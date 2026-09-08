@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="내가 학습한 이미지 분류 AI를 웹캠과 사진으로 시험합니다.">
+  <title>나만의 이미지 분류 AI</title>
+  <style>
+    :root { color-scheme: light; --blue: #174bc8; --ink: #18233b; --muted: #58657a; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f3f6fc; color: var(--ink); font: 18px/1.65 system-ui, -apple-system, "Malgun Gothic", sans-serif; }
+    main { width: min(1100px, 100%); margin: auto; padding: 40px 24px; }
+    header { border-top: 5px solid var(--blue); padding-top: 24px; margin-bottom: 28px; }
+    h1 { margin: 0 0 8px; font-size: clamp(1.7rem, 4vw, 2.4rem); line-height: 1.3; }
+    h2 { font-size: 1.3rem; margin: 0 0 18px; }
+    p { margin: 0 0 12px; }
+    header p, .note { color: var(--muted); }
+    .controls { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+    button { border: 1px solid #bdc9e0; border-radius: 9px; padding: 13px 22px; background: white; color: var(--ink); font: inherit; font-weight: 650; cursor: pointer; min-height: 54px; }
+    button.primary { background: var(--blue); color: white; border-color: var(--blue); }
+    button:hover:not(:disabled) { filter: brightness(.94); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    button:focus-visible, input:focus-visible { outline: 3px solid #e09a08; outline-offset: 4px; }
+    #status { padding: 12px 16px; border-left: 4px solid #bccbe9; background: #e8eefb; margin: 0 0 26px; overflow-wrap: anywhere; }
+    #status.error { border-color: #b32828; background: #fff0f0; color: #922020; }
+    .workspace { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 32px; background: white; padding: 28px; border-radius: 14px; }
+    .workspace > section { min-width: 0; }
+    .view { aspect-ratio: 1; background: #edf1f7; border: 1px solid #d9e0ec; border-radius: 10px; overflow: hidden; display: grid; place-items: center; }
+    #placeholder { text-align: center; padding: 24px; color: var(--muted); }
+    #preview { width: 100%; height: auto; display: block; }
+    [hidden] { display: none !important; }
+    #input-caption { margin: 12px 0 0; font-size: 1rem; color: var(--muted); overflow-wrap: anywhere; }
+    #best-label { font-size: clamp(1.6rem, 3.5vw, 2.2rem); line-height: 1.35; color: var(--blue); font-weight: 750; overflow-wrap: anywhere; margin-bottom: 8px; }
+    #best-score { color: var(--muted); margin-bottom: 24px; }
+    .prediction { margin: 16px 0; }
+    .prediction-line { display: flex; justify-content: space-between; gap: 16px; }
+    .class-name { overflow-wrap: anywhere; }
+    .value { white-space: nowrap; font-variant-numeric: tabular-nums; }
+    progress { display: block; width: 100%; height: 13px; margin-top: 6px; accent-color: var(--blue); }
+    .note { font-size: 1rem; margin-top: 25px; border-top: 1px solid #dce3ed; padding-top: 17px; }
+    footer { margin-top: 20px; color: var(--muted); font-size: 1rem; }
+    @media (max-width: 700px) {
+      main { padding: 24px 16px; }
+      .workspace { grid-template-columns: minmax(0, 1fr); padding: 20px; gap: 28px; }
+      button { padding: 12px 16px; flex: 1 1 auto; }
+    }
+  </style>
+</head>
+<body>
+  <!--
+    GitHub 저장소 구성:
+    index.html
+    model/model.json
+    model/metadata.json
+    model/weights.bin (다운로드한 가중치 파일 이름 그대로)
+
+    TensorFlow.js 형식으로 내보낸 '이미지' 모델을 사용하세요.
+    ZIP을 풀어 model 폴더에 넣고 GitHub Pages에서 실행하세요.
+    외부 라이브러리를 불러오므로 인터넷 연결이 필요합니다.
+    모델을 다시 학습한 경우 모델 파일 전체를 함께 교체하세요.
+    API 참고: https://github.com/googlecreativelab/teachablemachine-community/tree/master/libraries/image
+  -->
+  <main>
+    <header>
+      <h1 id="page-title">나만의 이미지 분류 AI</h1>
+      <p>웹캠으로 보여주거나 사진을 올려, 내가 학습한 AI의 판단을 확인하세요.</p>
+    </header>
+
+    <div class="controls" aria-label="이미지 입력 방법">
+      <button id="camera-start" class="primary" type="button">웹캠 시작</button>
+      <button id="camera-stop" type="button" disabled>분석 정지</button>
+      <button id="photo-button" type="button">사진 업로드</button>
+      <input id="photo-input" type="file" accept="image/jpeg,image/png,image/webp" hidden>
+    </div>
+    <p id="status" role="status" aria-live="polite">웹캠 시작 또는 사진 업로드를 선택하세요.</p>
+
+    <div class="workspace">
+      <section aria-labelledby="input-heading">
+        <h2 id="input-heading">AI에게 보여줄 이미지</h2>
+        <div class="view">
+          <p id="placeholder">분류할 대상을<br>화면 가운데에 보여주세요.</p>
+          <canvas id="preview" width="400" height="400" aria-label="AI가 분석하는 이미지" hidden></canvas>
+        </div>
+        <p id="input-caption">이미지 가운데의 정사각형 영역을 분석합니다.</p>
+        <video id="video" autoplay muted playsinline hidden></video>
+      </section>
+      <section aria-labelledby="result-heading">
+        <h2 id="result-heading">AI의 분류 결과</h2>
+        <p id="best-label">결과 대기 중</p>
+        <p id="best-score">이미지를 입력하면 결과가 표시됩니다.</p>
+        <div id="predictions" aria-label="종류별 예측 점수"></div>
+        <p class="note">표시된 %는 이 이미지에 대한 모델의 예측 점수입니다. 실제 정확도나 정답을 보장하지 않습니다. 학습하지 않은 대상도 기존 종류 중 하나로 분류될 수 있습니다.</p>
+      </section>
+    </div>
+    <footer>다른 방향·거리·배경에서도 시험하고, AI가 틀리는 조건을 찾아보세요.</footer>
+    <noscript><p>이 페이지를 사용하려면 브라우저의 JavaScript를 켜주세요.</p></noscript>
+  </main>
+
+  <!-- Teachable Machine 이미지 라이브러리의 호환 버전을 고정했습니다. -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8.5/dist/teachablemachine-image.min.js" defer></script>
+  <script>
+    window.addEventListener("DOMContentLoaded", () => {
+      "use strict";
+
+      // ================= 수업에서 수정할 부분 =================
+      const PAGE_TITLE = "나만의 이미지 분류 AI";
+      const MODEL_BASE = "./model/"; // 끝에 /를 붙이세요. 같은 폴더라면 ./
+      const MIRROR_CAMERA = true;  // 웹캠으로 학습한 손 모양에 맞춰 좌우 반전
+      // ========================================================
+
+      const byId = (id) => document.getElementById(id);
+      const startButton = byId("camera-start");
+      const stopButton = byId("camera-stop");
+      const photoButton = byId("photo-button");
+      const photoInput = byId("photo-input");
+      const status = byId("status");
+      const video = byId("video");
+      const canvas = byId("preview");
+      const context = canvas.getContext("2d");
+      let model = null;
+      let modelPromise = null;
+      let stream = null;
+      let runId = 0;
+      let timer = null;
+      let busy = false;
+      let rows = [];
+
+      document.title = PAGE_TITLE;
+      byId("page-title").textContent = PAGE_TITLE;
+
+      function setStatus(message, error = false) {
+        status.textContent = message;
+        status.classList.toggle("error", error);
+      }
+
+      function updateButtons() {
+        startButton.disabled = busy || Boolean(stream);
+        photoButton.disabled = busy;
+        stopButton.disabled = !busy && !stream;
+      }
+
+      function clearResult() {
+        byId("best-label").textContent = "결과 대기 중";
+        byId("best-score").textContent = "이미지를 입력하면 결과가 표시됩니다.";
+        rows.forEach(({ value, bar }) => { value.textContent = "—"; bar.value = 0; });
+      }
+
+      function stopCamera() {
+        runId += 1; // 정지 전에 시작된 비동기 결과는 화면에 표시하지 않습니다.
+        clearTimeout(timer);
+        timer = null;
+        if (stream) stream.getTracks().forEach((track) => track.stop());
+        stream = null;
+        video.pause();
+        video.srcObject = null;
+        busy = false;
+        updateButtons();
+      }
+
+      function resetPreview() {
+        canvas.hidden = true;
+        byId("placeholder").hidden = false;
+        byId("input-caption").textContent = "이미지 가운데의 정사각형 영역을 분석합니다.";
+        clearResult();
+      }
+
+      async function loadModel() {
+        if (model) return model;
+        if (modelPromise) return modelPromise;
+        modelPromise = (async () => {
+          if (location.protocol === "file:") {
+            throw new Error("GitHub Pages의 웹사이트 주소로 접속해주세요. HTML 파일을 더블클릭하면 모델 파일을 불러오지 못할 수 있습니다.");
+          }
+          if (!window.tf || !window.tmImage) {
+            throw new Error("AI 실행 도구를 불러오지 못했습니다. 인터넷 연결을 확인하고 페이지를 새로고침해주세요.");
+          }
+          try {
+            const loaded = await tmImage.load(MODEL_BASE + "model.json", MODEL_BASE + "metadata.json");
+            const labels = loaded.getClassLabels();
+            if (!labels.length) throw new Error("분류 이름이 없습니다.");
+            byId("predictions").replaceChildren();
+            rows = labels.map((label) => {
+              const row = document.createElement("div");
+              row.className = "prediction";
+              const line = document.createElement("div");
+              line.className = "prediction-line";
+              const name = document.createElement("span");
+              name.className = "class-name";
+              name.textContent = label;
+              const value = document.createElement("span");
+              value.className = "value";
+              value.textContent = "—";
+              const bar = document.createElement("progress");
+              bar.max = 100;
+              bar.value = 0;
+              bar.setAttribute("aria-label", label + " 예측 점수");
+              line.append(name, value);
+              row.append(line, bar);
+              byId("predictions").append(row);
+              return { value, bar };
+            });
+            model = loaded;
+            return model;
+          } catch (error) {
+            console.error("모델 로딩 오류:", error);
+            throw new Error("모델을 불러오지 못했습니다. " + MODEL_BASE + " 폴더에 model.json, metadata.json, 다운로드한 가중치(.bin) 파일이 모두 있는지 확인해주세요. TensorFlow.js 이미지 모델을 사용해야 합니다.");
+          }
+        })();
+        try { return await modelPromise; }
+        finally { modelPromise = null; }
+      }
+
+      // 미리보기와 AI 입력을 동일하게 맞춥니다. 사진은 반전하지 않습니다.
+      function drawInput(source, width, height, mirror) {
+        if (!width || !height) return false;
+        const side = Math.min(width, height);
+        context.save();
+        context.clearRect(0, 0, canvas.width, canvas.height);
+        if (mirror) { context.translate(canvas.width, 0); context.scale(-1, 1); }
+        context.drawImage(source, (width - side) / 2, (height - side) / 2, side, side, 0, 0, canvas.width, canvas.height);
+        context.restore();
+        canvas.hidden = false;
+        byId("placeholder").hidden = true;
+        return true;
+      }
+
+      async function predict(id) {
+        const predictions = await model.predict(canvas);
+        if (id !== runId) return;
+        let best = predictions[0];
+        predictions.forEach((prediction, index) => {
+          const percent = Math.max(0, Math.min(100, prediction.probability * 100));
+          if (rows[index]) {
+            rows[index].value.textContent = percent.toFixed(1) + "%";
+            rows[index].bar.value = percent;
+          }
+          if (prediction.probability > best.probability) best = prediction;
+        });
+        byId("best-label").textContent = best.className;
+        byId("best-score").textContent = "가장 높은 예측 점수: " + (best.probability * 100).toFixed(1) + "%";
+      }
+
+      function cameraMessage(error) {
+        const messages = {
+          NotAllowedError: "카메라 사용이 허용되지 않았습니다. 주소창 옆 사이트 설정에서 카메라를 허용한 뒤 다시 시작해주세요.",
+          NotFoundError: "사용할 수 있는 카메라가 없습니다. 웹캠을 연결하거나 사진 업로드를 이용해주세요.",
+          NotReadableError: "카메라를 사용할 수 없습니다. 다른 프로그램에서 카메라를 사용 중인지 확인해주세요."
+        };
+        return messages[error.name] || error.message || "카메라 실행 중 문제가 발생했습니다. 다시 시작하거나 사진 업로드를 이용해주세요.";
+      }
+
+      async function cameraLoop(id) {
+        if (id !== runId || !stream) return;
+        try {
+          if (drawInput(video, video.videoWidth, video.videoHeight, MIRROR_CAMERA)) await predict(id);
+          if (id === runId && stream) timer = setTimeout(() => cameraLoop(id), 140);
+        } catch (error) {
+          if (id !== runId) return;
+          console.error(error);
+          stopCamera();
+          resetPreview();
+          setStatus("이미지를 분석하지 못했습니다. 웹캠을 다시 시작해주세요.", true);
+        }
+      }
+
+      startButton.addEventListener("click", async () => {
+        stopCamera();
+        resetPreview();
+        const id = runId;
+        busy = true;
+        updateButtons();
+        setStatus("AI 모델을 불러오는 중입니다. 처음에는 잠시 걸릴 수 있습니다.");
+        try {
+          await loadModel();
+          if (id !== runId) return;
+          if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+            throw new Error("카메라를 사용하려면 HTTPS 웹사이트 주소로 접속해주세요. GitHub 저장소의 파일 화면 대신 GitHub Pages 주소를 열어주세요.");
+          }
+          setStatus("브라우저의 카메라 사용 요청을 허용해주세요.");
+          const acquired = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
+          if (id !== runId) { acquired.getTracks().forEach((track) => track.stop()); return; }
+          stream = acquired;
+          video.srcObject = stream;
+          await video.play();
+          if (id !== runId) return;
+          busy = false;
+          updateButtons();
+          byId("input-caption").textContent = "웹캠 실시간 분석 · 대상을 화면 가운데에 보여주세요.";
+          setStatus("웹캠을 분석하고 있습니다. 방향과 거리를 바꿔보세요.");
+          cameraLoop(id);
+        } catch (error) {
+          if (id !== runId) return;
+          stopCamera();
+          resetPreview();
+          setStatus(cameraMessage(error), true);
+        }
+      });
+
+      stopButton.addEventListener("click", () => {
+        stopCamera();
+        resetPreview();
+        setStatus("분석을 정지했습니다. 웹캠을 다시 시작하거나 사진을 업로드하세요.");
+      });
+
+      photoButton.addEventListener("click", () => photoInput.click());
+      photoInput.addEventListener("change", async () => {
+        const file = photoInput.files[0];
+        photoInput.value = ""; // 같은 파일도 다시 선택할 수 있게 합니다.
+        if (!file) return;
+        stopCamera();
+        resetPreview();
+        const id = runId;
+        if (!/\.(jpe?g|png|webp)$/i.test(file.name)) {
+          setStatus("JPG, PNG, WEBP 형식의 사진을 선택해주세요.", true);
+          return;
+        }
+        if (file.size > 20 * 1024 * 1024) {
+          setStatus("20MB 이하의 사진을 선택해주세요.", true);
+          return;
+        }
+        busy = true;
+        updateButtons();
+        setStatus("사진과 AI 모델을 준비하고 있습니다.");
+        let objectURL;
+        try {
+          await loadModel();
+          if (id !== runId) return;
+          const image = new Image();
+          objectURL = URL.createObjectURL(file);
+          await new Promise((resolve, reject) => {
+            image.onload = resolve;
+            image.onerror = () => reject(new Error("사진을 읽지 못했습니다. 다른 JPG 또는 PNG 사진을 선택해주세요."));
+            image.src = objectURL;
+          });
+          if (id !== runId) return;
+          drawInput(image, image.naturalWidth, image.naturalHeight, false);
+          byId("input-caption").textContent = file.name + " · 가운데 정사각형 영역 분석";
+          await predict(id);
+          if (id === runId) setStatus("사진 분석을 마쳤습니다. 학습에 사용하지 않은 다른 사진도 시험해보세요.");
+        } catch (error) {
+          if (id === runId) { clearResult(); setStatus(error.message || "사진 분석 중 문제가 발생했습니다.", true); }
+        } finally {
+          if (objectURL) URL.revokeObjectURL(objectURL);
+          if (id === runId) { busy = false; updateButtons(); }
+        }
+      });
+
+      window.addEventListener("pagehide", stopCamera);
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden && (stream || busy)) {
+          stopCamera();
+          resetPreview();
+          setStatus("화면을 벗어나 분석을 정지했습니다. 다시 시작해주세요.");
+        }
+      });
+    });
+  </script>
+</body>
+</html>

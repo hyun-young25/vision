@@ -20,15 +20,18 @@
     button.primary { background: var(--blue); color: white; border-color: var(--blue); }
     button:hover:not(:disabled) { filter: brightness(.94); }
     button:disabled { opacity: .5; cursor: not-allowed; }
-    button:focus-visible, input:focus-visible { outline: 3px solid #e09a08; outline-offset: 4px; }
+    button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px solid #e09a08; outline-offset: 4px; }
+    .camera-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 16px; margin-bottom: 16px; }
+    #camera-select { font: inherit; padding: 10px 12px; border: 1px solid #bdc9e0; border-radius: 9px; background: white; color: var(--ink); min-height: 48px; max-width: 100%; flex: 1 1 260px; min-width: 0; }
+    #camera-help { font-size: 1rem; margin: 0 0 20px; color: var(--muted); }
     #status { padding: 12px 16px; border-left: 4px solid #bccbe9; background: #e8eefb; margin: 0 0 26px; overflow-wrap: anywhere; }
     #status.error { border-color: #b32828; background: #fff0f0; color: #922020; }
     .workspace { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 32px; background: white; padding: 28px; border-radius: 14px; }
     .workspace > section { min-width: 0; }
-    .view { aspect-ratio: 1; background: #edf1f7; border: 1px solid #d9e0ec; border-radius: 10px; overflow: hidden; display: grid; place-items: center; }
+    .view { position: relative; aspect-ratio: 1; background: #edf1f7; border: 1px solid #d9e0ec; border-radius: 10px; overflow: hidden; display: grid; place-items: center; }
     #placeholder { text-align: center; padding: 24px; color: var(--muted); }
     #preview { width: 100%; height: auto; display: block; }
-    #video { width: 100%; height: 100%; object-fit: cover; }
+    #video { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: cover; }
     .model-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 16px; margin-bottom: 12px; }
     #model-status { margin: 0; color: var(--muted); flex: 1 1 280px; font-size: 1rem; overflow-wrap: anywhere; }
     #model-status.error { color: #922020; }
@@ -76,6 +79,11 @@
       <button id="photo-button" type="button">사진 업로드</button>
       <input id="photo-input" type="file" accept="image/jpeg,image/png,image/webp" hidden>
     </div>
+    <div class="camera-controls">
+      <label for="camera-select">사용할 카메라</label>
+      <select id="camera-select" disabled><option value="">기본 카메라 · 시작 후 선택할 수 있습니다</option></select>
+    </div>
+    <p id="camera-help">영상이 검으면 카메라 가림막을 열고, 목록에서 다른 카메라를 선택해보세요.</p>
     <p id="status" role="status" aria-live="polite">웹캠 시작 또는 사진 업로드를 선택하세요.</p>
     <div class="model-controls">
       <button id="model-button" type="button">모델 파일 연결</button>
@@ -120,10 +128,16 @@
       const inputCanvas = document.createElement("canvas");
       inputCanvas.width = inputCanvas.height = 400;
       const inputCtx = inputCanvas.getContext("2d");
+      const frameProbe = document.createElement("canvas");
+      frameProbe.width = frameProbe.height = 32;
+      const probeCtx = frameProbe.getContext("2d", { willReadFrequently: true });
+      const cameraSelect = $("camera-select");
       let stream = null, opening = false, mode = "idle", inputEpoch = 0;
       let cameraTimer = null, cameraHint = null, photo = null, inference = null;
       let model = null, modelLoading = false, modelTask = 0, autoAttempted = false;
       let libraryPromise = null, rows = [];
+      let frameState = "waiting", frameStateSince = 0, frameMessage = "";
+      let cameraName = "카메라", lastVideoTime = -1, lastVideoAdvance = 0;
       document.title = PAGE_TITLE;
       $("page-title").textContent = PAGE_TITLE;
       video.muted = true;
@@ -141,6 +155,7 @@
       function buttons() {
         $("camera-start").disabled = opening || Boolean(stream);
         $("camera-stop").disabled = !opening && mode === "idle";
+        cameraSelect.disabled = opening || cameraSelect.options.length < 2;
       }
       function clearResult() {
         $("best-label").textContent = "결과 대기 중";
@@ -155,6 +170,8 @@
         if (stream) stream.getTracks().forEach((track) => track.stop());
         stream = null;
         opening = false;
+        frameState = "waiting"; frameStateSince = 0; frameMessage = "";
+        lastVideoTime = -1; lastVideoAdvance = 0;
         video.pause();
         video.srcObject = null;
         video.hidden = canvas.hidden = true;
@@ -166,6 +183,67 @@
         buttons();
       }
       function dispose(candidate) { candidate?.model?.dispose?.(); }
+
+      async function refreshCameras(epoch = inputEpoch) {
+        if (!navigator.mediaDevices?.enumerateDevices) return;
+        try {
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          if (epoch !== inputEpoch) return;
+          const selected = stream?.getVideoTracks()[0]?.getSettings?.().deviceId || cameraSelect.value;
+          cameraSelect.replaceChildren();
+          const defaultOption = document.createElement("option");
+          defaultOption.value = ""; defaultOption.textContent = "브라우저 기본 카메라";
+          cameraSelect.append(defaultOption);
+          devices.filter((device) => device.kind === "videoinput" && device.deviceId).forEach((device, index) => {
+            const option = document.createElement("option");
+            option.value = device.deviceId; option.textContent = device.label || "카메라 " + (index + 1);
+            cameraSelect.append(option);
+          });
+          cameraSelect.value = Array.from(cameraSelect.options).some((option) => option.value === selected) ? selected : "";
+          buttons();
+        } catch { /* 목록 확인 실패가 이미 연결된 카메라를 정지시키지 않습니다. */ }
+      }
+
+      // 어두운 단색 화면은 가림막이나 빈 영상일 수 있습니다. 원인을 단정하지 않습니다.
+      function isDarkUniformFrame(pixels) {
+        let sum = 0, squares = 0, maximum = 0;
+        const count = pixels.length / 4;
+        if (!count) return false;
+        for (let i = 0; i < pixels.length; i += 4) {
+          const brightness = (pixels[i] + pixels[i + 1] + pixels[i + 2]) / 3;
+          sum += brightness; squares += brightness * brightness;
+          maximum = Math.max(maximum, brightness);
+        }
+        const mean = sum / count;
+        return mean < 45 && maximum < 60 && Math.max(0, squares / count - mean * mean) < 20;
+      }
+      function inspectCameraFrame() {
+        const track = stream?.getVideoTracks()[0];
+        const now = performance.now();
+        if (!track || track.readyState === "ended" || track.muted || !track.enabled) return "waiting";
+        if (video.readyState < 2 || !video.videoWidth || !video.videoHeight) return "waiting";
+        if (video.currentTime !== lastVideoTime) { lastVideoTime = video.currentTime; lastVideoAdvance = now; }
+        if (video.paused || now - lastVideoAdvance > 5000) return "waiting";
+        try {
+          probeCtx.drawImage(video, 0, 0, 32, 32);
+          return isDarkUniformFrame(probeCtx.getImageData(0, 0, 32, 32).data) ? "dark" : "ready";
+        } catch { return "unreadable"; }
+      }
+      function reportCameraFrame(next) {
+        const now = performance.now();
+        if (next !== frameState) { frameState = next; frameStateSince = now; }
+        let message;
+        if (next === "ready") {
+          message = cameraName + " · 영상이 들어오고 있습니다.";
+        } else {
+          clearResult();
+          if (now - frameStateSince < 2000) message = cameraName + " · 카메라 영상이 들어오는지 확인하고 있습니다.";
+          else if (next === "dark") message = cameraName + " · 영상이 매우 어둡고 거의 단색입니다. 가림막·카메라 차단 키를 확인하거나 다른 카메라를 선택하세요. 분류는 잠시 멈췄습니다.";
+          else if (next === "unreadable") message = "카메라 영상을 읽지 못했습니다. 분석 정지 후 다시 시작하거나 다른 카메라를 선택하세요.";
+          else message = cameraName + " · 연결은 되었지만 새 영상이 들어오지 않습니다. 카메라 차단 설정을 확인하거나 다른 카메라를 선택하세요.";
+        }
+        if (message !== frameMessage) { frameMessage = message; status(message, next !== "ready" && now - frameStateSince >= 2000); }
+      }
 
       // 외부 AI 라이브러리를 기다리지 않고 카메라 버튼부터 작동합니다.
       function loadScript(url) {
@@ -287,6 +365,7 @@
       }
       async function classify(epoch) {
         if (!model || modelLoading || inference || epoch !== inputEpoch) return;
+        if (mode === "camera" && frameState !== "ready") return;
         const activeModel = model;
         const activeTask = modelTask;
         const ready = mode === "camera"
@@ -318,7 +397,8 @@
       }
       async function cameraLoop(epoch) {
         if (epoch !== inputEpoch || mode !== "camera" || !stream) return;
-        await classify(epoch);
+        reportCameraFrame(inspectCameraFrame());
+        if (frameState === "ready") await classify(epoch);
         if (epoch === inputEpoch && mode === "camera") cameraTimer = setTimeout(() => cameraLoop(epoch), 150);
       }
       function cameraError(error) {
@@ -326,11 +406,12 @@
           NotAllowedError: "카메라 사용이 차단되었습니다. 주소창 왼쪽 사이트 설정에서 카메라를 허용해주세요. 채팅 미리보기 안에서는 파일을 내려받아 별도 창이나 GitHub Pages에서 열어주세요.",
           NotFoundError: "연결된 카메라를 찾지 못했습니다. 웹캠 연결을 확인하거나 사진 업로드를 이용해주세요.",
           NotReadableError: "카메라를 열 수 없습니다. Zoom·Teams·카메라 앱 등에서 사용 중인지와 Windows 카메라 개인정보 설정을 확인해주세요.",
-          OverconstrainedError: "선택한 카메라 설정을 사용할 수 없습니다. 다른 웹캠을 연결해주세요.",
+          OverconstrainedError: "선택한 카메라를 사용할 수 없습니다. 목록에서 브라우저 기본 카메라 또는 다른 카메라를 선택하고 다시 시작해주세요.",
           SecurityError: "이 페이지에서 카메라 접근이 제한되었습니다. 별도 브라우저 창의 HTTPS 주소로 접속해주세요."
         })[error.name] || error.message || "카메라를 시작하지 못했습니다.";
       }
-      $("camera-start").addEventListener("click", async () => {
+      async function startCamera() {
+        const deviceId = cameraSelect.value;
         resetInput();
         const epoch = inputEpoch;
         opening = true; buttons();
@@ -342,10 +423,13 @@
           cameraHint = setTimeout(() => {
             if (epoch === inputEpoch && opening) status("카메라 응답을 기다리고 있습니다. 주소창 옆 카메라 권한을 확인하거나 '분석 정지' 후 다시 시도해주세요.");
           }, 15000);
-          const acquired = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+          const acquired = await navigator.mediaDevices.getUserMedia({ video: deviceId ? { deviceId: { exact: deviceId } } : true, audio: false });
           if (epoch !== inputEpoch) { acquired.getTracks().forEach((track) => track.stop()); return; }
           stream = acquired;
           mode = "camera";
+          cameraName = stream.getVideoTracks()[0]?.label || "카메라";
+          frameStateSince = performance.now();
+          void refreshCameras(epoch);
           video.hidden = false;
           $("placeholder").hidden = true;
           video.srcObject = stream;
@@ -353,8 +437,8 @@
           if (epoch !== inputEpoch) return;
           clearTimeout(cameraHint);
           opening = false; buttons();
-          $("input-caption").textContent = "실시간 웹캠 · 화면 가운데의 대상을 분석합니다.";
-          status("카메라가 켜졌습니다. 학습 모델이 연결되면 분류 결과가 표시됩니다.");
+          $("input-caption").textContent = cameraName + " · 화면 가운데의 대상을 분석합니다.";
+          status("카메라에 연결했습니다. 실제 영상이 들어오는지 확인하고 있습니다.");
           for (const track of stream.getVideoTracks()) track.addEventListener("ended", () => {
             if (epoch === inputEpoch) { resetInput(); status("카메라 연결이 종료되었습니다. 다시 시작해주세요.", true); }
           });
@@ -363,6 +447,10 @@
         } catch (error) {
           if (epoch === inputEpoch) { resetInput(); status(cameraError(error), true); }
         }
+      }
+      $("camera-start").addEventListener("click", () => { void startCamera(); });
+      cameraSelect.addEventListener("change", () => {
+        if (mode === "camera" || opening) void startCamera();
       });
       $("camera-stop").addEventListener("click", () => {
         resetInput(); status("분석을 정지했습니다. 웹캠을 다시 시작하거나 사진을 선택하세요.");
@@ -408,6 +496,7 @@
         finally { URL.revokeObjectURL(objectURL); }
       });
       window.addEventListener("pagehide", resetInput);
+      navigator.mediaDevices?.addEventListener?.("devicechange", () => { void refreshCameras(); });
       // 권한 창이나 파일 선택 창을 열었을 때 분석을 취소하지 않습니다.
     })();
   </script>
